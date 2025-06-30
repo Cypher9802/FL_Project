@@ -1,46 +1,35 @@
-import torch
-import os
+# Federated Learning and Privacy Configuration
 
-class Config:
-    # Dataset Configuration
-    NUM_CLASSES = 6  # UCI HAR activities
-    INPUT_SIZE = 128  # Window size
-    INPUT_FEATURES = 9  # 3x acc + 3x gyro + 3x total_acc
-    
-    # Federated Learning Parameters
-    TOTAL_CLIENTS = 30
-    CLIENT_FRACTION = 0.33  # 10/30 clients per round
-    ROUNDS = 30
-    LOCAL_EPOCHS = 5
-    BATCH_SIZE = 16  # Mobile-optimized
-    
-    # Privacy Requirements (YOUR SPECIFICATIONS)
-    EPSILON = 8.0
-    DELTA = 1e-5
-    MAX_GRAD_NORM = 1.0
-    NOISE_MULTIPLIER = 1.2
-    
-    # Model Requirements (YOUR SPECIFICATIONS)
-    TARGET_ACCURACY = 0.95  # >95%
-    MAX_MODEL_SIZE_MB = 5   # <5MB
-    
-    # Training Configuration
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    LR = 0.01
-    MOMENTUM = 0.9
-    WEIGHT_DECAY = 1e-4
-    
-    # Privacy & Security (YOUR REQUIREMENTS)
-    USE_SECURE_AGGREGATION = True
-    USE_DIFFERENTIAL_PRIVACY = True
-    
-    # Paths
-    MODEL_SAVE_PATH = "models/"
-    
-    @classmethod
-    def setup_directories(cls):
-        os.makedirs("models", exist_ok=True)
-        os.makedirs("results", exist_ok=True)
+dataset:
+  name: UCI_HAR
+  num_classes: 6
+  input_size: 128
+  input_features: 9
 
-config = Config()
-config.setup_directories()
+federated:
+  total_clients: 30
+  client_fraction: 0.33      # 10/30 clients per round
+  rounds: 30
+  local_epochs: 5
+  batch_size: 16
+
+privacy:
+  epsilon: 8.0
+  delta: 1e-5
+  max_grad_norm: 1.0
+  noise_multiplier: 1.2      # Calibrated for ε & δ
+
+model:
+  target_accuracy: 0.95
+  max_size_mb: 5
+  save_path: models/fl_model.pt
+
+training:
+  device: auto               # 'auto' uses GPU if available
+  learning_rate: 0.01
+  momentum: 0.9
+  weight_decay: 1e-4
+
+security:
+  use_secure_aggregation: true
+  aggregation_noise_scale: 0.1
