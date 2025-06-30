@@ -9,20 +9,17 @@ DATASET_DIR = current_dir.parent / "UCI HAR Dataset"
 def check_and_prompt_download():
     if not DATASET_DIR.exists():
         print(f"[INFO] UCI HAR dataset not found in '{DATASET_DIR}'.")
-        print("[ACTION] Please download and unzip the dataset into your project root folder so it looks like:")
-        print("  Fl_Project/")
-        print("    ├── data/")
-        print("    └── UCI HAR Dataset/")
-        print("Then re-run this script.")
+        print("[ACTION] Please download and unzip the dataset into your project root folder.")
         return False
     return True
 
 def load_signals(subdir, signal_type):
     base_path = DATASET_DIR / subdir / 'Inertial Signals'
+    # FIX: Use the correct file naming pattern with subdir suffix
     signal_files = [
-        f"{signal_type}_x.txt", 
-        f"{signal_type}_y.txt", 
-        f"{signal_type}_z.txt"
+        f"{signal_type}_x_{subdir}.txt", 
+        f"{signal_type}_y_{subdir}.txt", 
+        f"{signal_type}_z_{subdir}.txt"
     ]
     signals = []
     for file in signal_files:
