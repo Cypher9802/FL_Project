@@ -1,6 +1,5 @@
 import os
 import numpy as np
-import pandas as pd
 from sklearn.model_selection import train_test_split
 
 UCI_HAR_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
@@ -40,20 +39,14 @@ def load_subjects(subdir):
         return np.array([int(row.strip()) for row in f])
 
 def normalize_data(X):
-    """Normalize sensor data per feature dimension"""
     mean = np.mean(X, axis=(0, 1), keepdims=True)
     std = np.std(X, axis=(0, 1), keepdims=True)
-    return (X - mean) / (std + 1e-8)  # Add epsilon to avoid division by zero
+    return (X - mean) / (std + 1e-8)
 
 def preprocess_data(X, y, subjects):
-    """Apply all preprocessing steps from your PDF"""
-    # 1. Normalization
     X = normalize_data(X)
-    
-    # 2. Subject-based splitting
     subject_data = {}
     unique_subjects = np.unique(subjects)
-    
     for subj in unique_subjects:
         subject_mask = (subjects == subj)
         subject_data[subj] = {
@@ -61,12 +54,11 @@ def preprocess_data(X, y, subjects):
             'y': y[subject_mask],
             'subject_id': subj
         }
-    
     return subject_data
 
 def load_and_preprocess():
     if not check_and_prompt_download():
-        return None, None
+        return None
 
     # Load and combine train/test data
     X_train = load_signals('train', 'body_acc')
@@ -81,10 +73,8 @@ def load_and_preprocess():
     subjects_test = load_subjects('test')
     subjects = np.concatenate((subjects_train, subjects_test), axis=0)
     
-    # Apply preprocessing
     subject_data = preprocess_data(X, y, subjects)
     
-    # Split each subject's data into train/validate
     processed_data = {}
     for subj, data in subject_data.items():
         X_subj, X_val, y_subj, y_val = train_test_split(
@@ -102,10 +92,12 @@ def load_and_preprocess():
 # Example usage
 if __name__ == "__main__":
     subject_data = load_and_preprocess()
-    if subject_data:
+    if subject_data and isinstance(subject_data, dict):
         print(f"Loaded data for {len(subject_data)} subjects")
         for subj, data in list(subject_data.items())[:3]:  # Show first 3 subjects
             print(f"\nSubject {subj}:")
             print(f"  Training samples: {len(data['train']['y'])}")
             print(f"  Validation samples: {len(data['validate']['y'])}")
             print(f"  Activity distribution: {np.bincount(data['train']['y'])}")
+    else:
+        print("[ERROR] Dataset not loaded. Please download and extract the dataset as instructed above.")
