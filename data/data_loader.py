@@ -3,20 +3,20 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 
 UCI_HAR_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
-DATASET_DIR = "UCI_HAR_Dataset"
+DATASET_DIR = "UCI HAR Dataset"  # <-- matches your actual folder name
 
 def check_and_prompt_download():
     if not os.path.exists(DATASET_DIR):
         print(f"[INFO] UCI HAR dataset not found in '{DATASET_DIR}'.")
         print("[ACTION] Please download the dataset using the following command:")
         print(f"curl -L {UCI_HAR_URL} -o UCI_HAR_Dataset.zip")
-        print("unzip UCI_HAR_Dataset.zip -d UCI_HAR_Dataset")
+        print("unzip UCI_HAR_Dataset.zip")
         print("rm UCI_HAR_Dataset.zip  # Optional: remove zip after extraction")
         return False
     return True
 
 def load_signals(subdir, signal_type):
-    base_path = os.path.join(DATASET_DIR, 'UCI HAR Dataset', subdir, 'Inertial Signals')
+    base_path = os.path.join(DATASET_DIR, subdir, 'Inertial Signals')
     signal_files = [
         f"{signal_type}_x.txt", 
         f"{signal_type}_y.txt", 
@@ -29,12 +29,12 @@ def load_signals(subdir, signal_type):
     return np.transpose(np.array(signals), (1, 2, 0))
 
 def load_labels(subdir):
-    label_file = os.path.join(DATASET_DIR, 'UCI HAR Dataset', subdir, f'y_{subdir}.txt')
+    label_file = os.path.join(DATASET_DIR, subdir, f'y_{subdir}.txt')
     with open(label_file, 'r') as f:
         return np.array([int(row.strip()) for row in f])
 
 def load_subjects(subdir):
-    subject_file = os.path.join(DATASET_DIR, 'UCI HAR Dataset', subdir, f'subject_{subdir}.txt')
+    subject_file = os.path.join(DATASET_DIR, subdir, f'subject_{subdir}.txt')
     with open(subject_file, 'r') as f:
         return np.array([int(row.strip()) for row in f])
 
