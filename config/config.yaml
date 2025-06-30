@@ -3,47 +3,44 @@ import os
 
 class Config:
     # Dataset Configuration
-    NUM_CLASSES = 6  # UCI HAR has 6 activities
-    INPUT_SIZE = 128  # Window size (timesteps)
-    INPUT_FEATURES = 9  # 3x accelerometer + 3x gyroscope + 3x total acceleration
+    NUM_CLASSES = 6  # UCI HAR activities
+    INPUT_SIZE = 128  # Window size
+    INPUT_FEATURES = 9  # 3x acc + 3x gyro + 3x total_acc
     
-    # Federated Learning Configuration
-    TOTAL_CLIENTS = 30  # 30 subjects in UCI HAR
+    # Federated Learning Parameters
+    TOTAL_CLIENTS = 30
     CLIENT_FRACTION = 0.33  # 10/30 clients per round
     ROUNDS = 30
-    LOCAL_EPOCHS = 5  # Increased for better convergence
-    BATCH_SIZE = 16  # Smaller batch for mobile optimization
+    LOCAL_EPOCHS = 5
+    BATCH_SIZE = 16  # Mobile-optimized
     
-    # Differential Privacy Configuration  
+    # Privacy Requirements (YOUR SPECIFICATIONS)
     EPSILON = 8.0
     DELTA = 1e-5
     MAX_GRAD_NORM = 1.0
-    NOISE_MULTIPLIER = 1.2  # Calibrated for privacy budget
+    NOISE_MULTIPLIER = 1.2
     
-    # Model Configuration
-    TARGET_ACCURACY = 0.95
-    MAX_MODEL_SIZE_MB = 5
-    MODEL_SAVE_PATH = "models/fl_model.pt"
+    # Model Requirements (YOUR SPECIFICATIONS)
+    TARGET_ACCURACY = 0.95  # >95%
+    MAX_MODEL_SIZE_MB = 5   # <5MB
     
     # Training Configuration
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    LR = 0.01  # Higher learning rate for federated setting
+    LR = 0.01
     MOMENTUM = 0.9
     WEIGHT_DECAY = 1e-4
     
-    # Secure Aggregation
+    # Privacy & Security (YOUR REQUIREMENTS)
     USE_SECURE_AGGREGATION = True
-    AGGREGATION_NOISE_SCALE = 0.1
+    USE_DIFFERENTIAL_PRIVACY = True
     
-    # Privacy Analysis
-    PRIVACY_ACCOUNTANT_TYPE = "rdp"  # RDP for better accounting
+    # Paths
+    MODEL_SAVE_PATH = "models/"
     
     @classmethod
-    def create_dirs(cls):
-        """Create necessary directories"""
+    def setup_directories(cls):
         os.makedirs("models", exist_ok=True)
-        os.makedirs("logs", exist_ok=True)
         os.makedirs("results", exist_ok=True)
 
 config = Config()
-config.create_dirs()
+config.setup_directories()
