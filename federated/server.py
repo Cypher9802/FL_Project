@@ -1,110 +1,122 @@
-import socket, struct, threading, torch, io, time, logging, json
-from pathlib import Path
-from .aggregation import federated_average
-from .privacy import DifferentialPrivacyManager
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+import torch
+import numpy as np
+import random
+from collections import OrderedDict
+import json
+import os
 
 class FederatedServer:
-    def __init__(self, config, global_model):
+    def __init__(self, clients, global_model, config):
+        self.clients = clients
+        self.global_model = global_model.to(config.DEVICE)
         self.config = config
-        self.global_model = global_model.to('cpu')
-        self.client_updates = {}
-        self.active_clients = set()
-        self.lock = threading.Lock()
-        self.current_round = 0
-        self.server_running = True
-        self.priv = DifferentialPrivacyManager(config)
-        self.metrics_path = Path("training_metrics.json")
-        self.privacy_path = Path("server_privacy_analysis.json")
-        self.round_metrics = []
-
-    def save_privacy_metrics(self):
-        if hasattr(self.priv, 'accountant'):
-            analysis = self.priv.accountant.report()
-            self.privacy_path.write_text(json.dumps(analysis, indent=2))
-
-    def save_training_metrics(self, round_idx, participants, avg_loss):
-        metrics = []
-        if self.metrics_path.exists():
-            metrics = json.loads(self.metrics_path.read_text())
-        metrics.append({
-            'round': round_idx,
-            'participants': participants,
-            'average_loss': avg_loss
-        })
-        self.metrics_path.write_text(json.dumps(metrics, indent=2))
-
-    def start(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self.config['federated']['server_address'],
-                  self.config['federated']['server_port']))
-        sock.listen(128)  # Increased backlog
-        logging.info(f"Server bound to {self.config['federated']['server_address']}:{self.config['federated']['server_port']}")
-        logging.info("Listening with backlog size: 128")
-        threading.Thread(target=self.run_federated_learning, daemon=True).start()
-
-        while self.server_running:
-            try:
-                client_sock, _ = sock.accept()
-                threading.Thread(target=self.handle_client,
-                                 args=(client_sock,), daemon=True).start()
-            except:
+        self.device = config.DEVICE
+        
+        self.best_accuracy = 0.0
+        self.training_history = []
+        
+    def select_clients(self, round_num):
+        """Select exactly 10/30 clients per round"""
+        num_selected = 10  # YOUR REQUIREMENT: 10/30 per round
+        selected = random.sample(self.clients, num_selected)
+        print(f"Round {round_num}: Selected {len(selected)} clients")
+        return selected
+    
+    def secure_aggregate(self, client_updates):
+        """Secure aggregation with noise injection"""
+        if not client_updates:
+            return self.global_model.state_dict()
+        
+        global_dict = self.global_model.state_dict()
+        aggregated_dict = OrderedDict()
+        
+        # FedAvg aggregation
+        for key in global_dict.keys():
+            # Average client updates
+            averaged = torch.zeros_like(global_dict[key])
+            for update in client_updates:
+                averaged += update[key]
+            averaged /= len(client_updates)
+            
+            # Add secure aggregation noise
+            if self.config.USE_SECURE_AGGREGATION:
+                noise = torch.randn_like(averaged) * 0.01
+                averaged += noise
+            
+            aggregated_dict[key] = averaged
+        
+        return aggregated_dict
+    
+    def evaluate_global_model(self):
+        """Evaluate on all clients"""
+        self.global_model.eval()
+        total_correct = 0
+        total_samples = 0
+        
+        with torch.no_grad():
+            for client in self.clients:
+                for X, y in client.val_loader:
+                    X, y = X.to(self.device), y.to(self.device)
+                    outputs = self.global_model(X)
+                    _, predicted = torch.max(outputs, 1)
+                    total_samples += y.size(0)
+                    total_correct += (predicted == y).sum().item()
+        
+        accuracy = total_correct / total_samples
+        return accuracy
+    
+    def run_federated_training(self):
+        """Main FL training loop"""
+        print(f"🚀 Starting FL Training: Target >{self.config.TARGET_ACCURACY:.1%} accuracy")
+        print(f"Privacy: ε={self.config.EPSILON}, δ={self.config.DELTA}")
+        
+        for round_num in range(1, self.config.ROUNDS + 1):
+            print(f"\n--- ROUND {round_num}/{self.config.ROUNDS} ---")
+            
+            # Select clients (10/30)
+            selected_clients = self.select_clients(round_num)
+            
+            # Collect updates with DP
+            client_updates = []
+            privacy_costs = []
+            
+            for client in selected_clients:
+                update = client.train_local_model(self.global_model)
+                client_updates.append(update)
+                privacy_costs.append(client.privacy_spent)
+            
+            # Secure aggregation
+            aggregated_update = self.secure_aggregate(client_updates)
+            self.global_model.load_state_dict(aggregated_update)
+            
+            # Evaluate
+            accuracy = self.evaluate_global_model()
+            avg_privacy = np.mean(privacy_costs) if privacy_costs else 0
+            
+            print(f"Accuracy: {accuracy:.4f} | Privacy: {avg_privacy:.2f}")
+            
+            # Save best model
+            if accuracy > self.best_accuracy:
+                self.best_accuracy = accuracy
+                torch.save(self.global_model.state_dict(), 
+                          f"{self.config.MODEL_SAVE_PATH}best_model.pt")
+                print(f"✓ New best: {accuracy:.4f}")
+            
+            # Check target accuracy
+            if accuracy >= self.config.TARGET_ACCURACY:
+                print(f"🎯 TARGET ACCURACY {self.config.TARGET_ACCURACY:.1%} REACHED!")
                 break
-        sock.close()
-        logging.info("Server shut down")
-
-    def handle_client(self, cs):
-        cid = None
-        try:
-            cs.settimeout(30)
-            while self.server_running:
-                msg = cs.recv(1)
-                if not msg: break
-                if msg == b'R':
-                    cid = self.register(cs)
-                elif msg == b'G':
-                    self.send_model(cs)
-                elif msg == b'U':
-                    self.receive_update(cs)
-                elif msg == b'S':
-                    self.send_status(cs)
-                elif msg == b'H':
-                    self.handle_heartbeat(cs)
-        except:
-            pass
-        finally:
-            if cid is not None:
-                with self.lock:
-                    self.active_clients.discard(cid)
-            try: cs.close()
-            except: pass
-
-    # ... (register, handle_heartbeat, send_model, send_status, receive_update as before) ...
-
-    def run_federated_learning(self):
-        logging.info("Starting FL process")
-        for r in range(self.config['federated']['num_rounds']):
-            self.current_round = r
-            logging.info(f"Round {r+1}/{self.config['federated']['num_rounds']}")
-            start = time.time()
-            minp = min(3, self.config['federated']['clients_per_round'])
-            while time.time() - start < self.config['federated']['round_timeout']:
-                with self.lock:
-                    if len(self.client_updates) >= minp: break
-                time.sleep(1)
-            with self.lock:
-                if self.client_updates:
-                    ag = federated_average(list(self.client_updates.values()))
-                    self.global_model.load_state_dict(ag)
-                    avg_loss = 0.0  # You can calculate this if you pass losses from clients
-                    self.save_training_metrics(r+1, len(self.client_updates), avg_loss)
-                    self.save_privacy_metrics()
-                    self.client_updates.clear()
-                else:
-                    logging.warning(f"No updates in round {r+1}")
-            time.sleep(2)
-        self.server_running = False
-        self.save_privacy_metrics()
-        logging.info("FL process complete")
+            
+            # Save progress
+            self.training_history.append({
+                'round': round_num,
+                'accuracy': accuracy,
+                'privacy_cost': avg_privacy
+            })
+        
+        # Save final results
+        with open("results/training_results.json", "w") as f:
+            json.dump(self.training_history, f, indent=2)
+        
+        print(f"✅ Training completed! Best accuracy: {self.best_accuracy:.4f}")
+        return self.global_model, self.best_accuracy
