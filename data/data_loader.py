@@ -93,6 +93,7 @@ if __name__ == "__main__":
     if subject_data and isinstance(subject_data, dict):
         print(f"Loaded data for {len(subject_data)} subjects")
         for subj, data in list(subject_data.items())[:3]:  # Show first 3 subjects
+        #for subj, data in subject_data.items():           # Show all subjects
             print(f"\nSubject {subj}:")
             print(f"  Training samples: {len(data['train']['y'])}")
             print(f"  Validation samples: {len(data['validate']['y'])}")
