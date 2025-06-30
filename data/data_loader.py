@@ -1,22 +1,24 @@
-import os
+from pathlib import Path
 import numpy as np
 from sklearn.model_selection import train_test_split
 
-UCI_HAR_URL = "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
-DATASET_DIR = "UCI HAR Dataset"  # <-- matches your actual folder name
+# Get the directory of this script and set dataset directory relative to it
+current_dir = Path(__file__).resolve().parent
+DATASET_DIR = current_dir.parent / "UCI HAR Dataset"
 
 def check_and_prompt_download():
-    if not os.path.exists(DATASET_DIR):
+    if not DATASET_DIR.exists():
         print(f"[INFO] UCI HAR dataset not found in '{DATASET_DIR}'.")
-        print("[ACTION] Please download the dataset using the following command:")
-        print(f"curl -L {UCI_HAR_URL} -o UCI_HAR_Dataset.zip")
-        print("unzip UCI_HAR_Dataset.zip")
-        print("rm UCI_HAR_Dataset.zip  # Optional: remove zip after extraction")
+        print("[ACTION] Please download and unzip the dataset into your project root folder so it looks like:")
+        print("  Fl_Project/")
+        print("    ├── data/")
+        print("    └── UCI HAR Dataset/")
+        print("Then re-run this script.")
         return False
     return True
 
 def load_signals(subdir, signal_type):
-    base_path = os.path.join(DATASET_DIR, subdir, 'Inertial Signals')
+    base_path = DATASET_DIR / subdir / 'Inertial Signals'
     signal_files = [
         f"{signal_type}_x.txt", 
         f"{signal_type}_y.txt", 
@@ -24,17 +26,17 @@ def load_signals(subdir, signal_type):
     ]
     signals = []
     for file in signal_files:
-        with open(os.path.join(base_path, file), 'r') as f:
+        with open(base_path / file, 'r') as f:
             signals.append([np.array(row.split(), dtype=np.float32) for row in f])
     return np.transpose(np.array(signals), (1, 2, 0))
 
 def load_labels(subdir):
-    label_file = os.path.join(DATASET_DIR, subdir, f'y_{subdir}.txt')
+    label_file = DATASET_DIR / subdir / f'y_{subdir}.txt'
     with open(label_file, 'r') as f:
         return np.array([int(row.strip()) for row in f])
 
 def load_subjects(subdir):
-    subject_file = os.path.join(DATASET_DIR, subdir, f'subject_{subdir}.txt')
+    subject_file = DATASET_DIR / subdir / f'subject_{subdir}.txt'
     with open(subject_file, 'r') as f:
         return np.array([int(row.strip()) for row in f])
 
@@ -60,7 +62,6 @@ def load_and_preprocess():
     if not check_and_prompt_download():
         return None
 
-    # Load and combine train/test data
     X_train = load_signals('train', 'body_acc')
     X_test = load_signals('test', 'body_acc')
     X = np.concatenate((X_train, X_test), axis=0)
