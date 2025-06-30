@@ -1,73 +1,114 @@
-import socket, struct, torch, io, time, random, logging
-from .privacy import DifferentialPrivacyManager
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+import copy
+from opacus import PrivacyEngine
+from opacus.utils.batch_memory_manager import BatchMemoryManager
 
 class FederatedClient:
-    def __init__(self, config, client_id, model, train_loader):
+    def __init__(self, client_id, data, config):
+        self.client_id = client_id
         self.config = config
-        self.client_id = int(client_id)
-        self.model = model
-        self.train_loader = train_loader
-        self.device = torch.device("cpu")
-        self.model.to(self.device)
-        self.addr = (config['federated']['server_address'], int(config['federated']['server_port']))
-        self.priv = DifferentialPrivacyManager(config)
-        self.round = -1
-
-    def connect(self):
-        for i in range(5):  # 5 attempts with exponential backoff
-            try:
-                self.sock = socket.socket()
-                self.sock.settimeout(5)
-                self.sock.connect(self.addr)
-                self.sock.send(b'R')
-                self.sock.send(struct.pack('!I', self.client_id))
-                if self.sock.recv(2) == b'OK':
-                    logging.info(f"Client {self.client_id} connected")
-                    return True
-            except Exception as e:
-                delay = (2 ** i) + random.uniform(0.5, 2.0)
-                logging.warning(f"Client {self.client_id} connection attempt {i+1} failed: {str(e)}")
-                time.sleep(delay)
-        return False
-
-    def run(self):
-        if not self.connect(): return
-        while True:
-            try:
-                # get status
-                self.sock.send(b'S')
-                l=struct.unpack('!I',self.sock.recv(4))[0]; data=b''
-                while len(data)<l: data+=self.sock.recv(l-len(data))
-                st=torch.load(io.BytesIO(data))
-                if not st['server_running']: break
-                if st['current_round']!=self.round:
-                    self.round=st['current_round']
-                    # get model
-                    self.sock.send(b'G')
-                    l=struct.unpack('!I',self.sock.recv(4))[0]; buf=b''
-                    while len(buf)<l: buf+=self.sock.recv(l-len(buf))
-                    sd=torch.load(io.BytesIO(buf),map_location=self.device)
-                    self.model.load_state_dict(sd)
-                    # local train
-                    self.model.train()
-                    opt=torch.optim.Adam(self.model.parameters(),lr=self.config['federated']['learning_rate'])
-                    crit=torch.nn.CrossEntropyLoss()
-                    for epoch in range(self.config['federated']['local_epochs']):
-                        for i,(x,y) in enumerate(self.train_loader):
-                            opt.zero_grad(); out=self.model(x); loss=crit(out,y); loss.backward()
-                            final = (epoch==self.config['federated']['local_epochs']-1 and i==len(self.train_loader)-1)
-                            self.priv.apply(self.model, self.round, 1, final)
-                            opt.step()
-                    # send update
-                    buf=io.BytesIO(); torch.save(self.model.state_dict(),buf); b=buf.getvalue()
-                    self.sock.send(b'U'); self.sock.send(struct.pack('!I',self.client_id))
-                    self.sock.send(struct.pack('!I',self.round))
-                    self.sock.send(struct.pack('!I',len(b))); self.sock.sendall(b)
-                    self.sock.recv(3)
-                time.sleep(random.uniform(1,3))
-            except:
-                break
-        self.sock.close()
-        logging.info(f"Client {self.client_id} done")
+        self.device = config.DEVICE
+        
+        # Prepare data
+        self.train_loader, self.val_loader = self._prepare_data(data)
+        self.privacy_engine = None
+        self.privacy_spent = 0.0
+        
+    def _prepare_data(self, data):
+        """Convert data to PyTorch loaders"""
+        X_train, y_train = data['train']['X'], data['train']['y']
+        X_val, y_val = data['validate']['X'], data['validate']['y']
+        
+        train_dataset = TensorDataset(
+            torch.tensor(X_train, dtype=torch.float32),
+            torch.tensor(y_train, dtype=torch.long)
+        )
+        
+        val_dataset = TensorDataset(
+            torch.tensor(X_val, dtype=torch.float32),
+            torch.tensor(y_val, dtype=torch.long)
+        )
+        
+        train_loader = DataLoader(train_dataset, batch_size=self.config.BATCH_SIZE, 
+                                shuffle=True, drop_last=True)
+        val_loader = DataLoader(val_dataset, batch_size=len(val_dataset))
+        
+        return train_loader, val_loader
+    
+    def setup_privacy(self, model, optimizer):
+        """Setup differential privacy (ε=8.0, δ=1e-5)"""
+        self.privacy_engine = PrivacyEngine()
+        
+        model, optimizer, train_loader = self.privacy_engine.make_private_with_epsilon(
+            module=model,
+            optimizer=optimizer,
+            data_loader=self.train_loader,
+            epochs=self.config.LOCAL_EPOCHS,
+            target_epsilon=self.config.EPSILON / self.config.ROUNDS,
+            target_delta=self.config.DELTA,
+            max_grad_norm=self.config.MAX_GRAD_NORM,
+        )
+        
+        return model, optimizer, train_loader
+    
+    def train_local_model(self, global_model):
+        """Train with differential privacy"""
+        local_model = copy.deepcopy(global_model)
+        local_model.to(self.device)
+        local_model.train()
+        
+        optimizer = torch.optim.SGD(
+            local_model.parameters(),
+            lr=self.config.LR,
+            momentum=self.config.MOMENTUM,
+            weight_decay=self.config.WEIGHT_DECAY
+        )
+        
+        # Apply differential privacy
+        if self.config.USE_DIFFERENTIAL_PRIVACY:
+            local_model, optimizer, private_loader = self.setup_privacy(local_model, optimizer)
+        else:
+            private_loader = self.train_loader
+        
+        criterion = nn.CrossEntropyLoss()
+        
+        # Local training with DP
+        for epoch in range(self.config.LOCAL_EPOCHS):
+            with BatchMemoryManager(
+                data_loader=private_loader,
+                max_physical_batch_size=self.config.BATCH_SIZE,
+                optimizer=optimizer
+            ) as memory_safe_loader:
+                
+                for X, y in memory_safe_loader:
+                    X, y = X.to(self.device), y.to(self.device)
+                    
+                    optimizer.zero_grad()
+                    outputs = local_model(X)
+                    loss = criterion(outputs, y)
+                    loss.backward()
+                    optimizer.step()
+        
+        # Track privacy expenditure
+        if self.privacy_engine:
+            self.privacy_spent = self.privacy_engine.get_epsilon(self.config.DELTA)
+        
+        return local_model.state_dict()
+    
+    def evaluate(self, model):
+        """Evaluate model accuracy"""
+        model.eval()
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for X, y in self.val_loader:
+                X, y = X.to(self.device), y.to(self.device)
+                outputs = model(X)
+                _, predicted = torch.max(outputs, 1)
+                total += y.size(0)
+                correct += (predicted == y).sum().item()
+        
+        return correct / total
