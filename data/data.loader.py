@@ -1,89 +1,102 @@
-import os, random, numpy as np, pandas as pd
-import torch
-from sklearn.preprocessing import StandardScaler
-from torch.utils.data import Dataset, DataLoader
-from scipy.spatial.transform import Rotation as R
+from pathlib import Path
+import numpy as np
+from sklearn.model_selection import train_test_split
 
-class UCIHARDataset(Dataset):
-    def __init__(self, features, labels, augment_config=None):
-        self.features = torch.FloatTensor(features)
-        self.labels = torch.LongTensor(labels)
-        self.augment = augment_config or {}
+# Get the directory of this script and set dataset directory relative to it
+current_dir = Path(__file__).resolve().parent
+DATASET_DIR = current_dir.parent / "UCI HAR Dataset"
 
-    def __len__(self):
-        return len(self.features)
+def check_and_prompt_download():
+    if not DATASET_DIR.exists():
+        print(f"[INFO] UCI HAR dataset not found in '{DATASET_DIR}'.")
+        print("[ACTION] Please download and unzip the dataset into your project root folder.")
+        return False
+    return True
 
-    def __getitem__(self, idx):
-        x = self.features[idx].clone()
-        y = self.labels[idx]
-        if self.augment.get('enable_augmentation', False):
-            x = self._augment(x.numpy())
-            x = torch.FloatTensor(x)
-        return x, y
+def load_signals(subdir, signal_type):
+    base_path = DATASET_DIR / subdir / 'Inertial Signals'
+    # FIX: Use the correct file naming pattern with subdir suffix
+    signal_files = [
+        f"{signal_type}_x_{subdir}.txt", 
+        f"{signal_type}_y_{subdir}.txt", 
+        f"{signal_type}_z_{subdir}.txt"
+    ]
+    signals = []
+    for file in signal_files:
+        with open(base_path / file, 'r') as f:
+            signals.append([np.array(row.split(), dtype=np.float32) for row in f])
+    return np.transpose(np.array(signals), (1, 2, 0))
 
-    def _augment(self, arr):
-        if random.random() < float(self.augment.get('augmentation_probability', 0.5)):
-            # noise
-            std = float(self.augment.get('noise_std', 0.05))
-            arr += np.random.normal(0, std, arr.shape)
-            # rotation on first 9 dims
-            angle = np.radians(float(self.augment.get('rotation_angle', 15)))
-            if arr.size >= 9:
-                mat = arr[:9].reshape(3,3)
-                axis = np.random.randn(3); axis /= np.linalg.norm(axis)
-                rot = R.from_rotvec(angle * axis)
-                mat = rot.apply(mat)
-                arr[:9] = mat.flatten()
-            # scaling
-            lo, hi = map(float, self.augment.get('scaling_factor', [0.9,1.1]))
-            arr *= random.uniform(lo, hi)
-            # time shift
-            shift = random.randint(-int(self.augment.get('time_shift',5)),
-                                    int(self.augment.get('time_shift',5)))
-            if shift>0:
-                arr = np.concatenate([np.zeros(shift), arr[:-shift]])
-            elif shift<0:
-                arr = np.concatenate([arr[-shift:], np.zeros(-shift)])
-        return arr
+def load_labels(subdir):
+    label_file = DATASET_DIR / subdir / f'y_{subdir}.txt'
+    with open(label_file, 'r') as f:
+        return np.array([int(row.strip()) for row in f])
 
-class UCIHARDataLoader:
-    def __init__(self, config):
-        self.cfg = config
-        self.scaler = StandardScaler()
+def load_subjects(subdir):
+    subject_file = DATASET_DIR / subdir / f'subject_{subdir}.txt'
+    with open(subject_file, 'r') as f:
+        return np.array([int(row.strip()) for row in f])
 
-    def load_data(self):
-        d = "UCI HAR Dataset"
-        if not os.path.exists(d):
-            raise FileNotFoundError(f"Dataset folder '{d}' not found.")
-        train_X = pd.read_csv(os.path.join(d,"train","X_train.txt"), sep='\s+', header=None).values
-        test_X  = pd.read_csv(os.path.join(d,"test","X_test.txt"),   sep='\s+', header=None).values
-        train_y = pd.read_csv(os.path.join(d,"train","y_train.txt"), sep='\s+', header=None).values.ravel()
-        test_y  = pd.read_csv(os.path.join(d,"test","y_test.txt"),   sep='\s+', header=None).values.ravel()
-        train_s = pd.read_csv(os.path.join(d,"train","subject_train.txt"), sep='\s+', header=None).values.ravel()
-        test_s  = pd.read_csv(os.path.join(d,"test","subject_test.txt"),   sep='\s+', header=None).values.ravel()
-        X = np.vstack([train_X, test_X])
-        y = np.hstack([train_y, test_y]) - 1
-        s = np.hstack([train_s, test_s])
-        return X, y, s
+def normalize_data(X):
+    mean = np.mean(X, axis=(0, 1), keepdims=True)
+    std = np.std(X, axis=(0, 1), keepdims=True)
+    return (X - mean) / (std + 1e-8)
 
-    def get_data_loaders(self):
-        X, y, s = self.load_data()
-        if self.cfg['dataset']['normalize']:
-            X = self.scaler.fit_transform(X)
-        clients = {}
-        for sid in np.unique(s):
-            mask = s==sid
-            clients[int(sid-1)] = (X[mask], y[mask])
-        train_loaders, test_X, test_y = {}, [], []
-        for cid, (cx, cy) in clients.items():
-            n = len(cx); nt = max(1, int(n*self.cfg['dataset']['test_split']))
-            trX, trY = cx[nt:], cy[nt:]
-            vaX, vaY = cx[:nt], cy[:nt]
-            ds = UCIHARDataset(trX, trY, self.cfg['dataset']['augmentation'])
-            ds.augment['enable_augmentation'] = self.cfg['dataset']['enable_augmentation']
-            train_loaders[cid] = DataLoader(ds, batch_size=int(self.cfg['federated']['batch_size']), shuffle=True)
-            test_X.append(vaX); test_y.append(vaY)
-        vX, vY = np.vstack(test_X), np.hstack(test_y)
-        vds = UCIHARDataset(vX, vY)
-        val_loader = DataLoader(vds, batch_size=64, shuffle=False)
-        return train_loaders, val_loader
+def preprocess_data(X, y, subjects):
+    X = normalize_data(X)
+    subject_data = {}
+    unique_subjects = np.unique(subjects)
+    for subj in unique_subjects:
+        subject_mask = (subjects == subj)
+        subject_data[subj] = {
+            'X': X[subject_mask],
+            'y': y[subject_mask],
+            'subject_id': subj
+        }
+    return subject_data
+
+def load_and_preprocess():
+    if not check_and_prompt_download():
+        return None
+
+    X_train = load_signals('train', 'body_acc')
+    X_test = load_signals('test', 'body_acc')
+    X = np.concatenate((X_train, X_test), axis=0)
+    
+    y_train = load_labels('train')
+    y_test = load_labels('test')
+    y = np.concatenate((y_train, y_test), axis=0)
+    
+    subjects_train = load_subjects('train')
+    subjects_test = load_subjects('test')
+    subjects = np.concatenate((subjects_train, subjects_test), axis=0)
+    
+    subject_data = preprocess_data(X, y, subjects)
+    
+    processed_data = {}
+    for subj, data in subject_data.items():
+        X_subj, X_val, y_subj, y_val = train_test_split(
+            data['X'], data['y'], 
+            test_size=0.2, 
+            random_state=42
+        )
+        processed_data[subj] = {
+            'train': {'X': X_subj, 'y': y_subj},
+            'validate': {'X': X_val, 'y': y_val}
+        }
+    
+    return processed_data
+
+# Example usage
+if __name__ == "__main__":
+    subject_data = load_and_preprocess()
+    if subject_data and isinstance(subject_data, dict):
+        print(f"Loaded data for {len(subject_data)} subjects")
+        for subj, data in list(subject_data.items())[:3]:  # Show first 3 subjects
+        #for subj, data in subject_data.items():           # Show all subjects
+            print(f"\nSubject {subj}:")
+            print(f"  Training samples: {len(data['train']['y'])}")
+            print(f"  Validation samples: {len(data['validate']['y'])}")
+            print(f"  Activity distribution: {np.bincount(data['train']['y'])}")
+    else:
+        print("[ERROR] Dataset not loaded. Please download and extract the dataset as instructed above.")
