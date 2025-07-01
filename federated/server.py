@@ -1,43 +1,44 @@
 import torch
-import numpy as np
 import random
-from .aggregation import secure_agg
+from .aggregation import secure_aggregate
+from config import Config
 
 class Server:
-    def __init__(self, clients, model, config):
+    def __init__(self, clients, model):
         self.clients = clients
-        self.model = model.to(config['training']['device'])
-        self.config = config
+        self.model = model.to(Config.DEVICE)
         self.best_acc = 0.0
 
-    def select(self, rnd):
+    def select_clients(self, round_num):
         return random.sample(self.clients, 10)
 
     def evaluate(self):
         self.model.eval()
         correct, total = 0, 0
-        for c in self.clients:
-            for X, y in c.val_loader:
-                X, y = X.to(self.model.device), y.to(self.model.device)
-                preds = self.model(X).argmax(dim=1)
-                correct += (preds == y).sum().item()
-                total += len(y)
-        return correct/total
+        with torch.no_grad():
+            for client in self.clients:
+                for X, y in client.val_loader:
+                    X, y = X.to(self.model.device), y.to(self.model.device)
+                    preds = self.model(X).argmax(dim=1)
+                    correct += (preds == y).sum().item()
+                    total += y.size(0)
+        return correct / total
 
     def train(self):
-        for rnd in range(1, self.config['federated']['rounds']+1):
-            participants = self.select(rnd)
-            updates = [c.local_train(self.model) for c in participants]
-            agg_state = secure_agg(
+        for rnd in range(1, Config.ROUNDS + 1):
+            selected_clients = self.select_clients(rnd)
+            updates = [c.local_train(self.model) for c in selected_clients]
+            agg_state = secure_aggregate(
                 self.model, updates,
-                noise_scale=self.config['security']['aggregation_noise_scale'],
-                use_secure=self.config['security']['use_secure_aggregation'])
+                noise_scale=Config.AGGREGATION_NOISE_SCALE,
+                use_secure=Config.USE_SECURE_AGGREGATION)
             self.model.load_state_dict(agg_state)
             acc = self.evaluate()
-            print(f"Round {rnd}: Global Acc = {acc:.4f}")
+            print(f"Round {rnd}: Global Accuracy = {acc:.4f}")
             if acc > self.best_acc:
                 self.best_acc = acc
-                torch.save(self.model.state_dict(), self.config['model']['save_path'])
-            if acc >= self.config['model']['target_accuracy']:
+                torch.save(self.model.state_dict(), Config.MODEL_SAVE_PATH)
+            if acc >= Config.TARGET_ACCURACY:
+                print(f"Target accuracy {Config.TARGET_ACCURACY} reached.")
                 break
-        print(f"Training Done: Best Acc = {self.best_acc:.4f}")
+        print(f"Training complete. Best accuracy: {self.best_acc:.4f}")
