@@ -1,7 +1,7 @@
 import torch
 from collections import OrderedDict
 
-def secure_agg(global_model, client_states, noise_scale=0.1, use_secure=True):
+def secure_aggregate(global_model, client_states, noise_scale=0.1, use_secure=True):
     """
     Secure aggregation: FedAvg + noise injection.
     client_states: list of state_dicts from client updates
