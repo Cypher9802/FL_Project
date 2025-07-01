@@ -8,17 +8,13 @@ class MobileHARModel(nn.Module):
     def __init__(self):
         super().__init__()
         cfg = Config
-        f, t = cfg.INPUT_FEATURES, cfg.INPUT_SIZE
         self.features = nn.Sequential(
-            nn.Conv1d(f, 32, kernel_size=7, stride=2, padding=3),
-            # Replaced BatchNorm with GroupNorm (8 groups for 32 channels)
+            nn.Conv1d(cfg.INPUT_FEATURES, 32, kernel_size=7, stride=2, padding=3),
             nn.GroupNorm(8, 32),
             nn.ReLU(inplace=True),
             nn.MaxPool1d(2),
-            
             nn.Conv1d(32, 64, kernel_size=5, padding=2, groups=32),
             nn.Conv1d(64, 128, kernel_size=1),
-            # Replaced BatchNorm with GroupNorm (32 groups for 128 channels)
             nn.GroupNorm(32, 128),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool1d(4),
@@ -34,10 +30,11 @@ class MobileHARModel(nn.Module):
         self._check_model_size(cfg.MAX_MODEL_SIZE_MB)
 
     def forward(self, x):
-        if x.dim() == 3 and x.size(2) == Config.INPUT_FEATURES:
-            x = x.transpose(1, 2)
-        x = self.features(x)
-        return self.classifier(x)
+        # Accepts (batch, 128, 9) or (batch, 9, 128)
+        if x.dim() == 3:
+            if x.shape[1] == Config.INPUT_SIZE and x.shape[2] == Config.INPUT_FEATURES:
+                x = x.permute(0, 2, 1)  # (batch, features, timesteps)
+        return self.classifier(self.features(x))
 
     def _check_model_size(self, max_mb):
         with tempfile.NamedTemporaryFile(suffix='.pt') as tmp:
