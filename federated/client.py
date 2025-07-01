@@ -14,13 +14,16 @@ class Client:
         X_val, y_val = data['validate']['X'], data['validate']['y']
         self.train_loader = DataLoader(
             TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)),
-            batch_size=Config.BATCH_SIZE, shuffle=True, drop_last=True)
+            batch_size=Config.BATCH_SIZE, shuffle=True)
         self.val_loader = DataLoader(
             TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)),
             batch_size=len(y_val), shuffle=False)
         self.privacy_spent = 0.0
 
     def local_train(self, global_model):
+        # Debug: print shape of a batch
+        sample = next(iter(self.train_loader))[0]
+        print(f"Client {self.client_id} batch shape: {sample.shape}")
         model = copy.deepcopy(global_model).to(self.device)
         model.train()
         optimizer = torch.optim.SGD(
