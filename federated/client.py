@@ -1,73 +1,69 @@
-import socket, struct, torch, io, time, random, logging
-from .privacy import DifferentialPrivacyManager
+import copy
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+from opacus import PrivacyEngine
+from opacus.utils.batch_memory_manager import BatchMemoryManager
+from config import Config
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+class Client:
+    def __init__(self, client_id, data):
+        self.client_id = client_id
+        self.device = Config.DEVICE
+        X_train, y_train = data['train']['X'], data['train']['y']
+        X_val, y_val = data['validate']['X'], data['validate']['y']
+        self.train_loader = DataLoader(
+            TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)),
+            batch_size=Config.BATCH_SIZE, shuffle=True)
+        self.val_loader = DataLoader(
+            TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)),
+            batch_size=len(y_val), shuffle=False)
+        self.privacy_spent = 0.0
 
-class FederatedClient:
-    def __init__(self, config, client_id, model, train_loader):
-        self.config = config
-        self.client_id = int(client_id)
-        self.model = model
-        self.train_loader = train_loader
-        self.device = torch.device("cpu")
-        self.model.to(self.device)
-        self.addr = (config['federated']['server_address'], int(config['federated']['server_port']))
-        self.priv = DifferentialPrivacyManager(config)
-        self.round = -1
+    def local_train(self, global_model):
+        # Debug: print shape of a batch
+        sample = next(iter(self.train_loader))[0]
+        print(f"Client {self.client_id} batch shape: {sample.shape}")
+        model = copy.deepcopy(global_model).to(self.device)
+        model.train()
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr=Config.LR,
+            momentum=Config.MOMENTUM,
+            weight_decay=Config.WEIGHT_DECAY)
+        if Config.EPSILON > 0:
+            privacy_engine = PrivacyEngine()
+            model, optimizer, self.train_loader = privacy_engine.make_private_with_epsilon(
+                module=model,
+                optimizer=optimizer,
+                data_loader=self.train_loader,
+                epochs=Config.LOCAL_EPOCHS,
+                target_epsilon=Config.EPSILON / Config.ROUNDS,
+                target_delta=Config.DELTA,
+                max_grad_norm=Config.MAX_GRAD_NORM)
+        criterion = torch.nn.CrossEntropyLoss()
+        for _ in range(Config.LOCAL_EPOCHS):
+            with BatchMemoryManager(
+                data_loader=self.train_loader,
+                max_physical_batch_size=Config.BATCH_SIZE,
+                optimizer=optimizer) as memory_safe_loader:
+                for X, y in memory_safe_loader:
+                    X, y = X.to(self.device), y.to(self.device)
+                    optimizer.zero_grad()
+                    loss = criterion(model(X), y)
+                    loss.backward()
+                    optimizer.step()
+        if Config.EPSILON > 0:
+            self.privacy_spent = privacy_engine.get_epsilon(Config.DELTA)
+        return model.state_dict()
 
-    def connect(self):
-        for i in range(5):  # 5 attempts with exponential backoff
-            try:
-                self.sock = socket.socket()
-                self.sock.settimeout(5)
-                self.sock.connect(self.addr)
-                self.sock.send(b'R')
-                self.sock.send(struct.pack('!I', self.client_id))
-                if self.sock.recv(2) == b'OK':
-                    logging.info(f"Client {self.client_id} connected")
-                    return True
-            except Exception as e:
-                delay = (2 ** i) + random.uniform(0.5, 2.0)
-                logging.warning(f"Client {self.client_id} connection attempt {i+1} failed: {str(e)}")
-                time.sleep(delay)
-        return False
-
-    def run(self):
-        if not self.connect(): return
-        while True:
-            try:
-                # get status
-                self.sock.send(b'S')
-                l=struct.unpack('!I',self.sock.recv(4))[0]; data=b''
-                while len(data)<l: data+=self.sock.recv(l-len(data))
-                st=torch.load(io.BytesIO(data))
-                if not st['server_running']: break
-                if st['current_round']!=self.round:
-                    self.round=st['current_round']
-                    # get model
-                    self.sock.send(b'G')
-                    l=struct.unpack('!I',self.sock.recv(4))[0]; buf=b''
-                    while len(buf)<l: buf+=self.sock.recv(l-len(buf))
-                    sd=torch.load(io.BytesIO(buf),map_location=self.device)
-                    self.model.load_state_dict(sd)
-                    # local train
-                    self.model.train()
-                    opt=torch.optim.Adam(self.model.parameters(),lr=self.config['federated']['learning_rate'])
-                    crit=torch.nn.CrossEntropyLoss()
-                    for epoch in range(self.config['federated']['local_epochs']):
-                        for i,(x,y) in enumerate(self.train_loader):
-                            opt.zero_grad(); out=self.model(x); loss=crit(out,y); loss.backward()
-                            final = (epoch==self.config['federated']['local_epochs']-1 and i==len(self.train_loader)-1)
-                            self.priv.apply(self.model, self.round, 1, final)
-                            opt.step()
-                    # send update
-                    buf=io.BytesIO(); torch.save(self.model.state_dict(),buf); b=buf.getvalue()
-                    self.sock.send(b'U'); self.sock.send(struct.pack('!I',self.client_id))
-                    self.sock.send(struct.pack('!I',self.round))
-                    self.sock.send(struct.pack('!I',len(b))); self.sock.sendall(b)
-                    self.sock.recv(3)
-                time.sleep(random.uniform(1,3))
-            except:
-                break
-        self.sock.close()
-        logging.info(f"Client {self.client_id} done")
+    def evaluate(self, model):
+        model.eval()
+        correct, total = 0, 0
+        with torch.no_grad():
+            for X, y in self.val_loader:
+                X, y = X.to(self.device), y.to(self.device)
+                preds = model(X).argmax(dim=1)
+                correct += (preds == y).sum().item()
+                total += y.size(0)
+        return correct / total

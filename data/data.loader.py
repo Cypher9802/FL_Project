@@ -1,40 +1,34 @@
-from pathlib import Path
+import os
 import numpy as np
-from sklearn.model_selection import train_test_split
 
-# Get the directory of this script and set dataset directory relative to it
-current_dir = Path(__file__).resolve().parent
-DATASET_DIR = current_dir.parent / "UCI HAR Dataset"
+DATASET_DIR = "UCI HAR Dataset"
 
-def check_and_prompt_download():
-    if not DATASET_DIR.exists():
-        print(f"[INFO] UCI HAR dataset not found in '{DATASET_DIR}'.")
-        print("[ACTION] Please download and unzip the dataset into your project root folder.")
-        return False
-    return True
-
-def load_signals(subdir, signal_type):
-    base_path = DATASET_DIR / subdir / 'Inertial Signals'
-    # FIX: Use the correct file naming pattern with subdir suffix
-    signal_files = [
-        f"{signal_type}_x_{subdir}.txt", 
-        f"{signal_type}_y_{subdir}.txt", 
-        f"{signal_type}_z_{subdir}.txt"
-    ]
+def load_signals(subdir):
+    # Load all 9 sensor signals: body_acc, body_gyro, total_acc (x, y, z)
+    signal_types = ['body_acc', 'body_gyro', 'total_acc']
+    axes = ['x', 'y', 'z']
     signals = []
-    for file in signal_files:
-        with open(base_path / file, 'r') as f:
-            signals.append([np.array(row.split(), dtype=np.float32) for row in f])
-    return np.transpose(np.array(signals), (1, 2, 0))
+    for stype in signal_types:
+        for axis in axes:
+            file_path = os.path.join(DATASET_DIR, subdir, 'Inertial Signals', f"{stype}_{axis}_{subdir}.txt")
+            with open(file_path, 'r') as f:
+                # Each line: 128 floats
+                data = [np.array(row.strip().split(), dtype=np.float32) for row in f]
+                signals.append(np.stack(data))
+    # signals: list of 9 arrays, each shape (num_samples, 128)
+    # Stack to shape (9, num_samples, 128)
+    signals = np.stack(signals)  # (9, num_samples, 128)
+    # Transpose to (num_samples, 128, 9)
+    return signals.transpose(1, 2, 0)
 
 def load_labels(subdir):
-    label_file = DATASET_DIR / subdir / f'y_{subdir}.txt'
-    with open(label_file, 'r') as f:
-        return np.array([int(row.strip()) for row in f])
+    file_path = os.path.join(DATASET_DIR, subdir, f'y_{subdir}.txt')
+    with open(file_path, 'r') as f:
+        return np.array([int(row.strip()) - 1 for row in f])  # 0-based labels
 
 def load_subjects(subdir):
-    subject_file = DATASET_DIR / subdir / f'subject_{subdir}.txt'
-    with open(subject_file, 'r') as f:
+    file_path = os.path.join(DATASET_DIR, subdir, f'subject_{subdir}.txt')
+    with open(file_path, 'r') as f:
         return np.array([int(row.strip()) for row in f])
 
 def normalize_data(X):
@@ -45,58 +39,39 @@ def normalize_data(X):
 def preprocess_data(X, y, subjects):
     X = normalize_data(X)
     subject_data = {}
-    unique_subjects = np.unique(subjects)
-    for subj in unique_subjects:
-        subject_mask = (subjects == subj)
+    for subj in np.unique(subjects):
+        mask = (subjects == subj)
         subject_data[subj] = {
-            'X': X[subject_mask],
-            'y': y[subject_mask],
+            'X': X[mask],
+            'y': y[mask],
             'subject_id': subj
         }
     return subject_data
 
 def load_and_preprocess():
-    if not check_and_prompt_download():
+    if not os.path.exists(DATASET_DIR):
+        print(f"[INFO] UCI HAR dataset not found in '{DATASET_DIR}'.")
         return None
 
-    X_train = load_signals('train', 'body_acc')
-    X_test = load_signals('test', 'body_acc')
+    X_train = load_signals('train')
+    X_test = load_signals('test')
     X = np.concatenate((X_train, X_test), axis=0)
-    
     y_train = load_labels('train')
     y_test = load_labels('test')
     y = np.concatenate((y_train, y_test), axis=0)
-    
     subjects_train = load_subjects('train')
     subjects_test = load_subjects('test')
     subjects = np.concatenate((subjects_train, subjects_test), axis=0)
-    
     subject_data = preprocess_data(X, y, subjects)
-    
+
+    # Split each subject's data into train/validate
+    from sklearn.model_selection import train_test_split
     processed_data = {}
     for subj, data in subject_data.items():
-        X_subj, X_val, y_subj, y_val = train_test_split(
-            data['X'], data['y'], 
-            test_size=0.2, 
-            random_state=42
-        )
+        Xtr, Xval, ytr, yval = train_test_split(
+            data['X'], data['y'], test_size=0.2, random_state=42)
         processed_data[subj] = {
-            'train': {'X': X_subj, 'y': y_subj},
-            'validate': {'X': X_val, 'y': y_val}
+            'train': {'X': Xtr, 'y': ytr},
+            'validate': {'X': Xval, 'y': yval}
         }
-    
     return processed_data
-
-# Example usage
-if __name__ == "__main__":
-    subject_data = load_and_preprocess()
-    if subject_data and isinstance(subject_data, dict):
-        print(f"Loaded data for {len(subject_data)} subjects")
-        for subj, data in list(subject_data.items())[:3]:  # Show first 3 subjects
-        #for subj, data in subject_data.items():           # Show all subjects
-            print(f"\nSubject {subj}:")
-            print(f"  Training samples: {len(data['train']['y'])}")
-            print(f"  Validation samples: {len(data['validate']['y'])}")
-            print(f"  Activity distribution: {np.bincount(data['train']['y'])}")
-    else:
-        print("[ERROR] Dataset not loaded. Please download and extract the dataset as instructed above.")

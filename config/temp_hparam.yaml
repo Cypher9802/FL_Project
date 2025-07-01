@@ -1,29 +1,13 @@
-dataset:
-  normalize: true
-  random_seed: 42
-  test_split: 0.2
+# Temporary Hyperparameter Overrides (for experiments)
+
 federated:
+  rounds: 30
+  local_epochs: 3
   batch_size: 32
-  client_start_delay: 2.0
-  clients_per_round: 8
-  learning_rate: 0.0005
-  local_epochs: 1
-  num_clients: 30
-  num_rounds: 5
-  round_timeout: 60
-  server_address: 127.0.0.1
-  server_port: 8080
-mobile:
-  enable_pruning: true
-  enable_quantization: true
-  pruning_amount: 0.15
-  quantization_backend: qnnpack
-model:
-  dropout_rate: 0.2
-  hidden_layers:
-  - 64
-  - 32
-  input_size: 561
-  num_classes: 6
+
+training:
+  learning_rate: 0.005
+  weight_decay: 5e-4
+
 privacy:
-  enable_differential_privacy: false
+  noise_multiplier: 1.0
