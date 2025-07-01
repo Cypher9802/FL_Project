@@ -1,35 +1,51 @@
-# Federated Learning and Privacy Configuration
+import torch
+import os
 
-dataset:
-  name: UCI_HAR
-  num_classes: 6
-  input_size: 128
-  input_features: 9
+def resolve_device():
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
 
-federated:
-  total_clients: 30
-  client_fraction: 0.33      # 10/30 clients per round
-  rounds: 30
-  local_epochs: 5
-  batch_size: 16
+class Config:
+    # Dataset
+    NUM_CLASSES = 6
+    INPUT_SIZE = 128
+    INPUT_FEATURES = 9
 
-privacy:
-  epsilon: 8.0
-  delta: 1e-5
-  max_grad_norm: 1.0
-  noise_multiplier: 1.2      # Calibrated for ε & δ
+    # Federated Learning
+    TOTAL_CLIENTS = 30
+    CLIENT_FRACTION = 10 / 30  # 10 clients per round
+    ROUNDS = 30
+    LOCAL_EPOCHS = 5
+    BATCH_SIZE = 16
 
-model:
-  target_accuracy: 0.95
-  max_size_mb: 5
-  save_path: models/fl_model.pt
+    # Privacy
+    EPSILON = 8.0
+    DELTA = 1e-5
+    MAX_GRAD_NORM = 1.0
+    NOISE_MULTIPLIER = 1.2
 
-training:
-  device: auto               # 'auto' uses GPU if available
-  learning_rate: 0.01
-  momentum: 0.9
-  weight_decay: 1e-4
+    # Model
+    TARGET_ACCURACY = 0.95
+    MAX_MODEL_SIZE_MB = 5
+    MODEL_SAVE_PATH = "models/fl_model.pt"
 
-security:
-  use_secure_aggregation: true
-  aggregation_noise_scale: 0.1
+    # Training
+    DEVICE = resolve_device()
+    LR = 0.01
+    MOMENTUM = 0.9
+    WEIGHT_DECAY = 1e-4
+
+    # Security
+    USE_SECURE_AGGREGATION = True
+    AGGREGATION_NOISE_SCALE = 0.1
+
+    @staticmethod
+    def create_dirs():
+        os.makedirs("models", exist_ok=True)
+        os.makedirs("results", exist_ok=True)
+
+Config.create_dirs()
