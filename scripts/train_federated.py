@@ -1,23 +1,21 @@
-#!/usr/bin/env python3
-import yaml, torch, random, numpy as np
-from pathlib import Path
 from data.data_loader import load_and_preprocess
-from models.mobile_optimized import MobileNetHAR
+from models.mobile_optimized import MobileHARModel
 from federated.client import Client
 from federated.server import Server
+from config import Config
 
-# Load config
-cfg = yaml.safe_load(open("config/config.yaml"))
+def set_seed(seed=42):
+    import random, numpy as np, torch
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-def seed(s=42):
-    random.seed(s); np.random.seed(s); torch.manual_seed(s)
-seed()
+set_seed()
 
-# Load data
 data = load_and_preprocess()
-clients = [Client(sid, data[sid], cfg) for sid in data]
-
-# Initialize model & server
-model = MobileNetHAR(cfg)
-server = Server(clients, model, cfg)
+clients = [Client(sid, data[sid]) for sid in data]
+model = MobileHARModel()
+server = Server(clients, model)
 server.train()
