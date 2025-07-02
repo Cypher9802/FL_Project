@@ -1,3 +1,10 @@
 # Add these lines
 venv/
 .venv/
+# Ignore macOS system files
+.DS_Store
+
+# Ignore dataset and large files
+*.zip
+UCI HAR Dataset*
+human+activity+recognit*
