@@ -8,3 +8,12 @@ venv/
 *.zip
 UCI HAR Dataset*
 human+activity+recognit*
+
+# Ignore all processed data and large files
+data/processed/
+UCI HAR Dataset/
+*.npy
+*.joblib
+*.csv
+*.zip
+.DS_Store
