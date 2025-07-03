@@ -1,107 +1,107 @@
-import sys
+import os, sys, logging, numpy as np, torch
 from pathlib import Path
+from torch import nn, optim
+from torch.utils.data import TensorDataset, DataLoader
 
-# Add project root to sys.path for clean imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# --- Logging & Device ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+log = logging.getLogger(__name__)
+DEV = torch.device('cuda' if torch.cuda.is_available() else
+                   'mps'    if getattr(torch.backends, "mps", False) and torch.backends.mps.is_available() else
+                   'cpu')
+log.info(f"Using device: {DEV}")
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-from data.data_loader import load_and_preprocess
+# --- Paths ---
+ROOT       = Path(__file__).resolve().parent.parent
+PROC_DIR   = ROOT / "data" / "processed"
+MODEL_PATH = ROOT / "models" / "centralized_har_cnnlstm_best.pt"
+MODEL_PATH.parent.mkdir(exist_ok=True)
 
-# Device auto-detection (works on Mac, Linux, Windows)
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-    device = torch.device("mps")
-else:
-    device = torch.device("cpu")
-print(f"Using device: {device}")
+# --- Load Raw Windows ---
+def load_raw_windows(proc_dir: Path, split: str):
+    X_list, y_list = [], []
+    for subj in proc_dir.glob("subject_*"):
+        xp = subj / f"X_win_{split}.npy"
+        yp = subj / f"y_win_{split}.npy"
+        if xp.exists() and yp.exists():
+            X_list.append(np.load(xp))
+            y_list.append(np.load(yp))
+    if not X_list:
+        log.error(f"No `{split}` windows found in {proc_dir}")
+        sys.exit(1)
+    X = np.vstack(X_list)  # (N,128,9)
+    y = np.hstack(y_list)
+    log.info(f"Loaded {split}: X={X.shape}, y={y.shape}")
+    return X, y
 
-# Feedforward Neural Network as per your PDF
-class HAR_FNN(nn.Module):
-    def __init__(self, input_dim=561, num_classes=6):
+# --- Model: Tuned CNN-LSTM ---
+class CNN_LSTM(nn.Module):
+    def __init__(self, channels=9, hidden=64, nclass=6, kernel_size=5, dropout1=0.2, dropout2=0.3):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, num_classes)
+        self.cnn = nn.Sequential(
+            nn.Conv1d(channels, 64, kernel_size=kernel_size, padding=kernel_size//2),
+            nn.BatchNorm1d(64), nn.LeakyReLU(),
+            nn.Conv1d(64, 128, kernel_size=kernel_size, padding=kernel_size//2),
+            nn.BatchNorm1d(128), nn.LeakyReLU(),
+            nn.Dropout(dropout1)
+        )
+        self.lstm = nn.LSTM(128, hidden, num_layers=1, batch_first=True, bidirectional=True)
+        self.fc   = nn.Sequential(
+            nn.Linear(hidden*2, 64), nn.LeakyReLU(), nn.Dropout(dropout2),
+            nn.Linear(64, nclass)
         )
     def forward(self, x):
-        return self.net(x)
+        x = x.transpose(1,2)          # (batch,9,128)
+        x = self.cnn(x)               # (batch,128,128)
+        x = x.transpose(1,2)          # (batch,128,128)
+        _, (h, _) = self.lstm(x)      # h: (2, batch, hidden)
+        h = torch.cat([h[0], h[1]], 1)  # (batch, hidden*2)
+        return self.fc(h)
 
-# Load and preprocess data
-subject_data = load_and_preprocess()
-if subject_data is None:
-    print("Dataset not found or not loaded. Exiting.")
-    sys.exit(1)
+def main():
+    # Load train/val raw windows
+    Xtr, ytr = load_raw_windows(PROC_DIR, "train")
+    Xvl, yvl = load_raw_windows(PROC_DIR, "test")
 
-# Merge all subjects for centralized training
-X_train, y_train, X_val, y_val = [], [], [], []
-for subj in subject_data:
-    X_train.append(subject_data[subj]['train']['X'])
-    y_train.append(subject_data[subj]['train']['y'])
-    X_val.append(subject_data[subj]['validate']['X'])
-    y_val.append(subject_data[subj]['validate']['y'])
-X_train = np.concatenate(X_train)
-y_train = np.concatenate(y_train)
-X_val = np.concatenate(X_val)
-y_val = np.concatenate(y_val)
+    # Torch Datasets & Loaders
+    train_ds = TensorDataset(torch.tensor(Xtr).float(), torch.tensor(ytr).long())
+    val_ds   = TensorDataset(torch.tensor(Xvl).float(), torch.tensor(yvl).long())
+    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True,  drop_last=True)
+    val_loader   = DataLoader(val_ds,   batch_size=128, shuffle=False)
 
-# If data is 3D (samples, timesteps, features), flatten to 2D (samples, features*timesteps)
-if X_train.ndim == 3:
-    X_train = X_train.reshape(X_train.shape[0], -1)
-    X_val = X_val.reshape(X_val.shape[0], -1)
+    # Instantiate model, optimizer, loss, scheduler (tuned hyperparams)
+    model     = CNN_LSTM(kernel_size=5, dropout1=0.2, dropout2=0.3).to(DEV)
+    optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
+    criterion = nn.CrossEntropyLoss()
 
-# Torch datasets
-train_dataset = torch.utils.data.TensorDataset(
-    torch.tensor(X_train, dtype=torch.float32),
-    torch.tensor(y_train, dtype=torch.long)
-)
-val_dataset = torch.utils.data.TensorDataset(
-    torch.tensor(X_val, dtype=torch.float32),
-    torch.tensor(y_val, dtype=torch.long)
-)
+    best_acc = 0.0
+    for epoch in range(1, 61):
+        model.train()
+        train_loss = 0
+        for Xb, yb in train_loader:
+            Xb, yb = Xb.to(DEV), yb.to(DEV)
+            optimizer.zero_grad()
+            loss = criterion(model(Xb), yb)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        scheduler.step()
 
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
-val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=256, shuffle=False)
+        model.eval(); correct=total=0
+        with torch.no_grad():
+            for Xb, yb in val_loader:
+                Xb, yb = Xb.to(DEV), yb.to(DEV)
+                preds = model(Xb).argmax(1)
+                correct += (preds==yb).sum().item(); total += yb.size(0)
+        val_acc = correct/total
+        log.info(f"Epoch {epoch:02d}: train_loss={train_loss/len(train_loader):.4f}  val_acc={val_acc:.4f}")
+        if val_acc>best_acc:
+            best_acc=val_acc
+            torch.save(model.state_dict(), MODEL_PATH)
+            log.info(f"✔ New best model saved: {best_acc:.4f}")
 
-# Model, optimizer, loss
-model = HAR_FNN(input_dim=X_train.shape[1], num_classes=6).to(device)
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-criterion = nn.CrossEntropyLoss()
+    log.info(f"Training complete. Best validation accuracy: {best_acc:.4f}")
 
-# Training loop
-EPOCHS = 30
-best_acc = 0.0
-for epoch in range(1, EPOCHS+1):
-    model.train()
-    total_loss = 0
-    for X, y in train_loader:
-        X, y = X.to(device), y.to(device)
-        optimizer.zero_grad()
-        out = model(X)
-        loss = criterion(out, y)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-    # Validation
-    model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for X, y in val_loader:
-            X, y = X.to(device), y.to(device)
-            preds = model(X).argmax(1)
-            correct += (preds == y).sum().item()
-            total += y.size(0)
-    acc = correct / total
-    print(f"Epoch {epoch:02d}: loss={total_loss/len(train_loader):.4f}, val_acc={acc:.4f}")
-    if acc > best_acc:
-        best_acc = acc
-        torch.save(model.state_dict(), "models/centralized_har_fnn.pt")
-
-print(f"Training complete. Best validation accuracy: {best_acc:.4f}")
-print("Model saved to models/centralized_har_fnn.pt")
+if __name__=="__main__":
+    main()
