@@ -1,4 +1,8 @@
-import os, sys, logging, numpy as np, torch
+import os
+import sys
+import logging
+import numpy as np
+import torch
 from pathlib import Path
 from torch import nn, optim
 from torch.utils.data import TensorDataset, DataLoader
@@ -36,26 +40,26 @@ def load_raw_windows(proc_dir: Path, split: str):
 
 # --- Model: Tuned CNN-LSTM ---
 class CNN_LSTM(nn.Module):
-    def __init__(self, channels=9, hidden=64, nclass=6, kernel_size=5, dropout1=0.2, dropout2=0.3):
+    def __init__(self, channels=9, hidden=128, nclass=6, kernel_size=7, dropout1=0.2, dropout2=0.3):
         super().__init__()
         self.cnn = nn.Sequential(
             nn.Conv1d(channels, 64, kernel_size=kernel_size, padding=kernel_size//2),
-            nn.BatchNorm1d(64), nn.LeakyReLU(),
+            nn.BatchNorm1d(64), nn.SiLU(),  # Swish activation
             nn.Conv1d(64, 128, kernel_size=kernel_size, padding=kernel_size//2),
-            nn.BatchNorm1d(128), nn.LeakyReLU(),
+            nn.BatchNorm1d(128), nn.SiLU(),
             nn.Dropout(dropout1)
         )
-        self.lstm = nn.LSTM(128, hidden, num_layers=1, batch_first=True, bidirectional=True)
+        self.lstm = nn.LSTM(128, hidden, num_layers=2, batch_first=True, bidirectional=True)
         self.fc   = nn.Sequential(
-            nn.Linear(hidden*2, 64), nn.LeakyReLU(), nn.Dropout(dropout2),
+            nn.Linear(hidden*2, 64), nn.SiLU(), nn.Dropout(dropout2),
             nn.Linear(64, nclass)
         )
     def forward(self, x):
         x = x.transpose(1,2)          # (batch,9,128)
         x = self.cnn(x)               # (batch,128,128)
         x = x.transpose(1,2)          # (batch,128,128)
-        _, (h, _) = self.lstm(x)      # h: (2, batch, hidden)
-        h = torch.cat([h[0], h[1]], 1)  # (batch, hidden*2)
+        _, (h, _) = self.lstm(x)      # h: (num_layers*2, batch, hidden)
+        h = torch.cat([h[-2], h[-1]], 1)  # (batch, hidden*2)
         return self.fc(h)
 
 def main():
@@ -70,13 +74,13 @@ def main():
     val_loader   = DataLoader(val_ds,   batch_size=128, shuffle=False)
 
     # Instantiate model, optimizer, loss, scheduler (tuned hyperparams)
-    model     = CNN_LSTM(kernel_size=5, dropout1=0.2, dropout2=0.3).to(DEV)
-    optimizer = optim.AdamW(model.parameters(), lr=0.0005, weight_decay=1e-4)
+    model     = CNN_LSTM(kernel_size=7, dropout1=0.2, dropout2=0.3, hidden=128).to(DEV)
+    optimizer = optim.AdamW(model.parameters(), lr=0.0003, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
     criterion = nn.CrossEntropyLoss()
 
     best_acc = 0.0
-    for epoch in range(1, 61):
+    for epoch in range(1, 81):
         model.train()
         train_loss = 0
         for Xb, yb in train_loader:
