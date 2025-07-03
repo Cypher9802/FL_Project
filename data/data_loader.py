@@ -34,7 +34,17 @@ TEST_FILES = {
 FEATURE_NAMES_FILE     = os.path.join(DATASET_DIR, 'features.txt')
 ACTIVITY_LABELS_FILE   = os.path.join(DATASET_DIR, 'activity_labels.txt')
 
-# Use the original windows—no secondary re-windowing
+# Inertial signal file structure
+INERTIAL_DIRS = {
+    'train': os.path.join(DATASET_DIR, 'train', 'Inertial Signals'),
+    'test':  os.path.join(DATASET_DIR, 'test',  'Inertial Signals')
+}
+SIGNAL_FILES = [
+    'total_acc_x_', 'total_acc_y_', 'total_acc_z_',
+    'body_acc_x_',  'body_acc_y_',  'body_acc_z_',
+    'body_gyro_x_','body_gyro_y_','body_gyro_z_'
+]
+
 MIN_SAMPLES = 1  # allow all subjects
 WINDOW_SIZE = None
 STEP_SIZE = None
@@ -129,6 +139,36 @@ def save_fed(fed, scaler):
     import joblib
     joblib.dump(scaler, os.path.join(OUTPUT_DIR,'scaler.joblib'))
 
+# --- NEW: Load and save raw 128x9 inertial windows per subject -----------------
+def load_inertial_windows(split: str):
+    """
+    Load raw inertial windows (n_samples, 128, 9) and labels for 'train' or 'test'.
+    Returns:
+      X: np.ndarray of shape (n_samples, 128, 9)
+      y: np.ndarray of shape (n_samples,)
+    """
+    sig_dir = INERTIAL_DIRS[split]
+    paths = [os.path.join(sig_dir, f + split + '.txt') for f in SIGNAL_FILES]
+    arrays = [np.loadtxt(p) for p in paths]  # Each: (n_samples, 128)
+    X = np.stack(arrays, axis=-1)           # (n_samples, 128, 9)
+    y_path = TRAIN_FILES['labels'] if split=='train' else TEST_FILES['labels']
+    y = np.loadtxt(y_path, dtype=int)
+    return X, y - 1  # zero-indexed
+
+def save_inertial_windows(train_normalized, test_normalized):
+    """
+    Save each subject's raw-window data into data/processed/subject_{id}/X_win_train.npy, y_win_train.npy, etc.
+    """
+    for split, normed_df in zip(('train','test'), (train_normalized, test_normalized)):
+        X, y = load_inertial_windows(split)
+        subjects = normed_df['subject'].values
+        for sid in np.unique(subjects):
+            idx = np.where(subjects==sid)[0]
+            subject_dir = os.path.join(OUTPUT_DIR, f'subject_{sid}')
+            os.makedirs(subject_dir, exist_ok=True)
+            np.save(os.path.join(subject_dir, f'X_win_{split}.npy'), X[idx])
+            np.save(os.path.join(subject_dir, f'y_win_{split}.npy'), y[idx])
+
 def main():
     check_dataset_files()
     dftr, dfte = load_uci_har_data()
@@ -144,6 +184,10 @@ def main():
     if fed_test:
         save_fed(fed_test, scaler)
     logger.info(f"Processed {len(fed_train)} train clients, {len(fed_test)} test clients")
+
+    # --- NEW: Save raw inertial windows for each subject for CNN/LSTM training
+    save_inertial_windows(dftr, dfte)
+    logger.info("Raw inertial windows saved for all subjects.")
 
 if __name__=="__main__":
     main()
