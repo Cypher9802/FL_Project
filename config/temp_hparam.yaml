@@ -1,5 +1,4 @@
 # Temporary Hyperparameter Overrides (for experiments)
-# Updated for high accuracy training
 
 # Data preprocessing
 window_size: 128
@@ -26,7 +25,7 @@ federated:
 # Training
 training:
   learning_rate: 0.001
-  weight_decay: 1e-4
+  weight_decay: 0.0001
   momentum: 0.9
   max_grad_norm: 1.0
   target_accuracy: 0.95
@@ -35,18 +34,18 @@ training:
 # Scheduler
 scheduler:
   type: cyclic
-  base_lr: 1e-5
-  max_lr: 5e-3
+  base_lr: 0.00001
+  max_lr: 0.005
   step_size_up: 200
 
 # Privacy
 privacy:
   epsilon: 8.0
-  delta: 1e-5
+  delta: 0.00001
   noise_multiplier: 1.0
   use_secure_aggregation: true
   aggregation_noise_scale: 0.1
 
 # Paths
 model_save_path: "models/federated_har_model.pt"
-device: "auto"  # auto-detect cuda/mps/cpu
+device: "auto"

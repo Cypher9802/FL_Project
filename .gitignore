@@ -12,6 +12,7 @@ human+activity+recognit*
 # Ignore all processed data and large files
 data/processed/
 data/__pycache__/
+models/__pycache__
 UCI HAR Dataset/
 *.npy
 *.joblib
@@ -25,4 +26,5 @@ models/centralized_har_cnnlstm_raw.pt
 models/centralized_har_cnnlstm_best.pt
 models/centralized_har_deepmlp.pt
 models/centralized_har_fnn.pt
+models/federated_har_model.pt
 
