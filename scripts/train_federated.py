@@ -1,21 +1,38 @@
-from data.data_loader import load_and_preprocess
-from models.mobile_optimized import MobileHARModel
+import yaml
+import torch
+import random
+import numpy as np
+import logging
+from pathlib import Path
+
 from federated.client import Client
 from federated.server import Server
-from config import Config
+from models.mobile_optimized import CNN_LSTM_Attn
+from data.data_loader import save_processed, prepare_split
 
-def set_seed(seed=42):
-    import random, numpy as np, torch
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+# Load config
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+with open(CONFIG_PATH, "r") as f:
+    cfg = yaml.safe_load(f)
 
-set_seed()
+# Process data and create clients
+save_processed()
+clients_data = []
+for s, ((Xtr, ytr), (Xvl, yvl)) in prepare_split("train").items():
+    clients_data.append(Client(
+        client_id=s,
+        data={"train": {"X": Xtr, "y": ytr}, "validate": {"X": Xvl, "y": yvl}}
+    ))
 
-data = load_and_preprocess()
-clients = [Client(sid, data[sid]) for sid in data]
-model = MobileHARModel()
-server = Server(clients, model)
-server.train()
+# Initialize server
+DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+global_model = CNN_LSTM_Attn().to(DEV)
+server = Server(clients=clients_data, model=global_model)
+
+def main():
+    logging.basicConfig(level=logging.INFO)
+    best_acc = server.train()
+    print(f"Federated training complete. Best global accuracy: {best_acc:.4f}")
+
+if __name__ == "__main__":
+    main()

@@ -1,57 +1,75 @@
-#!/usr/bin/env python3
-import sys
-from pathlib import Path
-# add project root for imports
-sys.path.append(str(Path(__file__).parent.parent))
-
 import yaml
-import itertools
+import optuna
 import torch
-import random
 import numpy as np
+from torch import optim, nn
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.model_selection import train_test_split
+from pathlib import Path
 
-from data.data_loader import load_and_preprocess
-from federated.client import Client
-from federated.server import Server
-from models.mobile_optimized import MobileNetHAR
+from data.data_loader import save_processed, PROC_DIR
+from models.mobile_optimized import CNN_LSTM_Attn
 
-def set_seed(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+# Load base config
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+with open(CONFIG_PATH, "r") as f:
+    base_cfg = yaml.safe_load(f)
 
-# load base config
-cfg = yaml.safe_load(open("config/config.yaml"))
+DEV = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# simple hyperparameter grid
-grid = {
-    "training.learning_rate": [0.001, 0.005, 0.01],
-    "federated.local_epochs": [3, 5],
-    "federated.batch_size": [16, 32],
-}
+def objective(trial):
+    # Suggest hyperparameters
+    lr = trial.suggest_loguniform("learning_rate", 1e-4, 1e-2)
+    dropout1 = trial.suggest_uniform("dropout1", 0.1, 0.5)
+    dropout2 = trial.suggest_uniform("dropout2", 0.1, 0.5)
+    hidden = trial.suggest_int("lstm_hidden", 64, 256)
+    heads = trial.suggest_int("n_heads", 2, 8)
 
-keys, values = zip(*grid.items())
+    # Prepare data
+    save_processed()
+    X, y = (np.vstack([np.load(p) for p in PROC_DIR.glob("subject_*/X_win_train.npy")]),
+            np.hstack([np.load(p) for p in PROC_DIR.glob("subject_*/y_win_train.npy")]))
+    X_tr, X_val, y_tr, y_val = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
 
-for combo in itertools.product(*values):
-    # build a working copy of config
-    config = yaml.safe_load(open("config/config.yaml"))
-    for key, val in zip(keys, combo):
-        section, param = key.split(".")
-        config[section][param] = val
+    train_ds = TensorDataset(torch.tensor(X_tr).float(), torch.tensor(y_tr).long())
+    val_ds   = TensorDataset(torch.tensor(X_val).float(), torch.tensor(y_val).long())
+    tr_loader = DataLoader(train_ds, batch_size=base_cfg["federated"]["batch_size"], shuffle=True)
+    vl_loader = DataLoader(val_ds, batch_size=128)
 
-    print(f"\n🔍 Testing hyperparams: {dict(zip(keys, combo))}")
-    set_seed(42)
+    # Build model
+    model = CNN_LSTM_Attn(hidden=hidden, n_heads=heads).to(DEV)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=base_cfg["training"]["weight_decay"])
+    scheduler = torch.optim.lr_scheduler.CyclicLR(
+        optimizer,
+        base_lr=base_cfg["scheduler"]["base_lr"],
+        max_lr=base_cfg["scheduler"]["max_lr"],
+        step_size_up=base_cfg["scheduler"]["step_size_up"],
+        mode="triangular"
+    )
+    criterion = nn.CrossEntropyLoss(label_smoothing=base_cfg["training"]["label_smoothing"])
 
-    # load data and create clients
-    data = load_and_preprocess()
-    clients = [Client(sid, data[sid], config) for sid in data]
+    # Training loop (few epochs for tuning)
+    for _ in range(10):
+        model.train()
+        for Xb, yb in tr_loader:
+            Xb, yb = Xb.to(DEV), yb.to(DEV)
+            optimizer.zero_grad()
+            loss = criterion(model(Xb), yb)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
 
-    # init model and server
-    model = MobileNetHAR(config)
-    server = Server(clients, model, config)
+    # Validation accuracy
+    model.eval()
+    correct = total = 0
+    with torch.no_grad():
+        for Xb, yb in vl_loader:
+            preds = model(Xb.to(DEV)).argmax(1)
+            correct += (preds == yb.to(DEV)).sum().item()
+            total += yb.size(0)
+    return correct / total
 
-    # train and record accuracy
-    _, acc = server.train()
-    print(f"→ Resulting accuracy: {acc:.4f}")
+if __name__ == "__main__":
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=50)
+    print("Best hyperparameters:", study.best_params)

@@ -1,193 +1,118 @@
-import os
-import sys
-import warnings
 import numpy as np
-import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
+from pathlib import Path
+import yaml
+from imblearn.over_sampling import SMOTE
 from sklearn.model_selection import train_test_split
-import json
-import logging
 
-# --- Logging setup ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Load configuration from YAML
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+with open(CONFIG_PATH, "r") as f:
+    config = yaml.safe_load(f)
 
-warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
-warnings.filterwarnings("ignore", category=FutureWarning, module="numpy")
+# Extract hyperparameters
+WINDOW_SIZE = config["window_size"]
+STEP_SIZE = config["step_size"]
+SMOTE_K = config["smote_k_neighbors"]
+NOISE_LEVEL = config["noise_level"]
+ROT_STD = config["rot_std"]
 
-# --- Paths ---
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATASET_DIR = os.path.join(PROJECT_ROOT, 'UCI HAR Dataset')
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'data', 'processed')
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Define project paths
+ROOT     = Path(__file__).resolve().parent.parent
+UCI_ROOT = ROOT / "UCI HAR Dataset"
+PROC_DIR = ROOT / "data" / "processed"
+PROC_DIR.mkdir(parents=True, exist_ok=True)
 
-TRAIN_FILES = {
-    'features': os.path.join(DATASET_DIR, 'train', 'X_train.txt'),
-    'labels':   os.path.join(DATASET_DIR, 'train', 'y_train.txt'),
-    'subjects': os.path.join(DATASET_DIR, 'train', 'subject_train.txt')
-}
-TEST_FILES = {
-    'features': os.path.join(DATASET_DIR, 'test',  'X_test.txt'),
-    'labels':   os.path.join(DATASET_DIR, 'test',  'y_test.txt'),
-    'subjects': os.path.join(DATASET_DIR, 'test',  'subject_test.txt')
-}
-FEATURE_NAMES_FILE     = os.path.join(DATASET_DIR, 'features.txt')
-ACTIVITY_LABELS_FILE   = os.path.join(DATASET_DIR, 'activity_labels.txt')
-
-# Inertial signal file structure
-INERTIAL_DIRS = {
-    'train': os.path.join(DATASET_DIR, 'train', 'Inertial Signals'),
-    'test':  os.path.join(DATASET_DIR, 'test',  'Inertial Signals')
-}
-SIGNAL_FILES = [
-    'total_acc_x_', 'total_acc_y_', 'total_acc_z_',
-    'body_acc_x_',  'body_acc_y_',  'body_acc_z_',
-    'body_gyro_x_','body_gyro_y_','body_gyro_z_'
-]
-
-MIN_SAMPLES = 1  # allow all subjects
-WINDOW_SIZE = None
-STEP_SIZE = None
-
-def check_dataset_files():
-    required = list(TRAIN_FILES.values()) + list(TEST_FILES.values()) + [FEATURE_NAMES_FILE, ACTIVITY_LABELS_FILE]
-    missing = [f for f in required if not os.path.exists(f)]
-    if missing:
-        logger.error("Missing files: %s", missing)
-        sys.exit(1)
-    logger.info("All required dataset files found.")
-
-def load_feature_names():
-    raw = pd.read_csv(FEATURE_NAMES_FILE, sep=r'\s+', header=None, names=['idx','name'])['name']
-    seen, uniq = {}, []
-    for n in raw:
-        seen[n] = seen.get(n,0) + 1
-        uniq.append(f"{n}_{seen[n]-1}" if seen[n]>1 else n)
-    return uniq
-
-def load_activity_labels():
-    df = pd.read_csv(ACTIVITY_LABELS_FILE, sep=r'\s+', header=None, names=['id','act'])
-    return dict(zip(df['id'], df['act']))
-
-def load_uci_har_data():
-    fnames = load_feature_names()
-    acts   = load_activity_labels()
-    # Train
-    Xtr = pd.read_csv(TRAIN_FILES['features'], sep=r'\s+', header=None)
-    ytr = pd.read_csv(TRAIN_FILES['labels'], sep=r'\s+', header=None)
-    strn = pd.read_csv(TRAIN_FILES['subjects'], sep=r'\s+', header=None)
-    Xtr.columns = fnames
-    dftr = pd.concat([strn.rename(columns={0:'subject'}), ytr.rename(columns={0:'activity'}), Xtr], axis=1)
-    # Test
-    Xte = pd.read_csv(TEST_FILES['features'], sep=r'\s+', header=None)
-    yte = pd.read_csv(TEST_FILES['labels'], sep=r'\s+', header=None)
-    stst= pd.read_csv(TEST_FILES['subjects'], sep=r'\s+', header=None)
-    Xte.columns = fnames
-    dfte = pd.concat([stst.rename(columns={0:'subject'}), yte.rename(columns={0:'activity'}), Xte], axis=1)
-    logger.info(f"Loaded train {dftr.shape}, test {dfte.shape}")
-    return dftr, dfte
-
-def normalize(df_train, df_test):
-    feats = [c for c in df_train.columns if c not in ('subject','activity')]
-    scaler = MinMaxScaler()
-    df_train[feats] = scaler.fit_transform(df_train[feats])
-    df_test[feats]  = scaler.transform(df_test[feats])
-    return df_train, df_test, scaler
-
-def split_by_subject(df):
-    out = {}
-    for sid, grp in df.groupby('subject'):
-        out[sid] = grp.drop(columns='subject').reset_index(drop=True)
-    return out
-
-def augment(df, noise_level=0.01, rot_std=0.05):
-    cols = [c for c in df.columns if c!='activity']
-    X = df[cols].values
-    y = df['activity'].values
-    noise = np.random.normal(0, noise_level, X.shape)
-    Xn = np.clip(X + noise, 0, 1)
-    rf = np.random.normal(1.0, rot_std, X.shape)
-    Xr = np.clip(Xn * rf, 0, 1)
-    df2= pd.DataFrame(Xr, columns=cols); df2['activity']=y
-    return df2
-
-def prepare_fed(subjects, augment_data=True):
-    fed = {}
-    for sid, df in subjects.items():
-        logger.info(f"Subject {sid}: {len(df)} samples")
-        if augment_data:
-            df = augment(df)
-        X = df.drop(columns='activity').values
-        y = df['activity'].values
-        if len(y)<MIN_SAMPLES:
-            logger.warning(f"Subject {sid}: too few samples, skipping")
-            continue
-        # stratify if possible
-        try:
-            Xtr, Xvl, ytr, yvl = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y if len(np.unique(y))>1 else None)
-        except:
-            Xtr, Xvl, ytr, yvl = train_test_split(X, y, test_size=0.2, random_state=42, stratify=None)
-        fed[sid] = {'X_train':Xtr, 'X_val':Xvl, 'y_train':ytr, 'y_val':yvl}
-    return fed
-
-def save_fed(fed, scaler):
-    for sid,data in fed.items():
-        ddir = os.path.join(OUTPUT_DIR, f'subject_{sid}')
-        os.makedirs(ddir, exist_ok=True)
-        for k,v in data.items():
-            np.save(os.path.join(ddir, f'{k}.npy'), v)
-    import joblib
-    joblib.dump(scaler, os.path.join(OUTPUT_DIR,'scaler.joblib'))
-
-# --- NEW: Load and save raw 128x9 inertial windows per subject -----------------
-def load_inertial_windows(split: str):
+def load_raw_inertial(split: str):
     """
-    Load raw inertial windows (n_samples, 128, 9) and labels for 'train' or 'test'.
+    Loads the 9 raw inertial signals for the given split.
     Returns:
-      X: np.ndarray of shape (n_samples, 128, 9)
-      y: np.ndarray of shape (n_samples,)
+      X: np.ndarray of shape (n_windows, window_size, 9)
+      y: np.ndarray of shape (n_windows,)
+      subj: np.ndarray of shape (n_windows,)
     """
-    sig_dir = INERTIAL_DIRS[split]
-    paths = [os.path.join(sig_dir, f + split + '.txt') for f in SIGNAL_FILES]
-    arrays = [np.loadtxt(p) for p in paths]  # Each: (n_samples, 128)
-    X = np.stack(arrays, axis=-1)           # (n_samples, 128, 9)
-    y_path = TRAIN_FILES['labels'] if split=='train' else TEST_FILES['labels']
-    y = np.loadtxt(y_path, dtype=int)
-    return X, y - 1  # zero-indexed
+    signals = [
+        'body_acc_x', 'body_acc_y', 'body_acc_z',
+        'body_gyro_x','body_gyro_y','body_gyro_z',
+        'total_acc_x','total_acc_y','total_acc_z'
+    ]
+    X_list = []
+    for sig in signals:
+        path = UCI_ROOT / split / 'Inertial Signals' / f"{sig}_{split}.txt"
+        X_list.append(np.loadtxt(path))
+    X = np.stack(X_list, axis=-1)  # shape: (n_windows, window_size, 9)
+    y = np.loadtxt(UCI_ROOT / split / f"y_{split}.txt").astype(int) - 1
+    subj = np.loadtxt(UCI_ROOT / split / f"subject_{split}.txt").astype(int)
+    return X, y, subj
 
-def save_inertial_windows(train_normalized, test_normalized):
+def normalize(X: np.ndarray) -> np.ndarray:
+    """Min-max normalize each feature across all windows and timesteps."""
+    X_min = X.min(axis=(0,1), keepdims=True)
+    X_max = X.max(axis=(0,1), keepdims=True)
+    return (X - X_min) / (X_max - X_min + 1e-8)
+
+def augment_noise_warp(X: np.ndarray) -> np.ndarray:
+    """Apply light Gaussian noise and occasional time-flip to simulate device variation."""
+    X_noised = X + np.random.normal(0, NOISE_LEVEL, X.shape)
+    if np.random.rand() < 0.3:
+        X_noised = np.flip(X_noised, axis=1)
+    return X_noised
+
+def balance_smote(X: np.ndarray, y: np.ndarray):
     """
-    Save each subject's raw-window data into data/processed/subject_{id}/X_win_train.npy, y_win_train.npy, etc.
+    Apply SMOTE-style oversampling to balance class counts.
+    Returns resampled X (n_resampled, window_size, 9) and y (n_resampled,).
     """
-    for split, normed_df in zip(('train','test'), (train_normalized, test_normalized)):
-        X, y = load_inertial_windows(split)
-        subjects = normed_df['subject'].values
-        for sid in np.unique(subjects):
-            idx = np.where(subjects==sid)[0]
-            subject_dir = os.path.join(OUTPUT_DIR, f'subject_{sid}')
-            os.makedirs(subject_dir, exist_ok=True)
-            np.save(os.path.join(subject_dir, f'X_win_{split}.npy'), X[idx])
-            np.save(os.path.join(subject_dir, f'y_win_{split}.npy'), y[idx])
+    n, w, f = X.shape
+    X_flat = X.reshape(n, w*f)
+    sm = SMOTE(k_neighbors=SMOTE_K)
+    X_res, y_res = sm.fit_resample(X_flat, y)
+    X_res = X_res.reshape(-1, w, f)
+    return X_res, y_res
 
-def main():
-    check_dataset_files()
-    dftr, dfte = load_uci_har_data()
-    dftr, dfte, scaler = normalize(dftr, dfte)
-    tr_subs = split_by_subject(dftr)
-    te_subs = split_by_subject(dfte)
-    fed_train = prepare_fed(tr_subs, augment_data=True)
-    fed_test  = prepare_fed(te_subs, augment_data=False)
-    if not fed_train:
-        logger.error("No training clients processed.")
-        sys.exit(1)
-    save_fed(fed_train, scaler)
-    if fed_test:
-        save_fed(fed_test, scaler)
-    logger.info(f"Processed {len(fed_train)} train clients, {len(fed_test)} test clients")
+def prepare_split(split: str):
+    """
+    For each subject in the split:
+      - Load and normalize
+      - Balance & augment (train only)
+      - Stratified train/val split
+    Returns a dict mapping subject_id -> ((X_train, y_train), (X_val, y_val))
+    """
+    X, y, subj = load_raw_inertial(split)
+    X = normalize(X)
+    clients = {}
+    for s in np.unique(subj):
+        idx = subj == s
+        X_sub, y_sub = X[idx], y[idx]
+        if split == 'train':
+            X_sub, y_sub = balance_smote(X_sub, y_sub)
+            X_sub = augment_noise_warp(X_sub)
+        X_tr, X_val, y_tr, y_val = train_test_split(
+            X_sub, y_sub,
+            test_size=0.2,
+            stratify=y_sub,
+            random_state=42
+        )
+        clients[int(s)] = ((X_tr, y_tr), (X_val, y_val))
+    return clients
 
-    # --- NEW: Save raw inertial windows for each subject for CNN/LSTM training
-    save_inertial_windows(dftr, dfte)
-    logger.info("Raw inertial windows saved for all subjects.")
+def save_processed():
+    """
+    Execute preprocessing for both 'train' and 'test' splits,
+    saving subject-wise .npy files under data/processed/subject_##/.
+    """
+    for split in ["train", "test"]:
+        clients = prepare_split(split)
+        for subj_id, ((X_tr, y_tr), (X_val, y_val)) in clients.items():
+            out_dir = PROC_DIR / f"subject_{subj_id:02d}"
+            out_dir.mkdir(exist_ok=True)
+            # Save train or test accordingly
+            if split == "train":
+                np.save(out_dir / "X_win_train.npy", X_tr)
+                np.save(out_dir / "y_win_train.npy", y_tr)
+            else:
+                np.save(out_dir / "X_win_test.npy", X_val)
+                np.save(out_dir / "y_win_test.npy", y_val)
 
-if __name__=="__main__":
-    main()
+if __name__ == "__main__":
+    save_processed()
+    print("Data preprocessing complete: .npy files saved in data/processed/")  
